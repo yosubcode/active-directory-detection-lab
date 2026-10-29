@@ -167,15 +167,15 @@ The attack surfaces on the SIEM's Threat Hunting dashboard — level-12 alerts, 
 
 Acting as the SOC / defender after the alert fired, following the NIST IR lifecycle as a lab exercise (not a response to a real-world breach).
 
-### 5.1 Preparation ✅
+### 5.1 Preparation
 - Sysmon (SwiftOnSecurity config) on endpoints; Wazuh SIEM collecting Security + Sysmon logs.
 - Custom detection rule `100100` deployed with MITRE mapping.
 
-### 5.2 Identification ✅
+### 5.2 Identification
 - Rule `100100` fired a level-12 alert.
 - Triage: an RC4 TGS request for a *user* service account (`svc-sql`) from a workstation IP is not normal business activity → **confirmed genuine incident**, not a false positive.
 
-### 5.3 Containment ✅
+### 5.3 Containment
 
 ```cmd
 :: Invalidate the stolen credential — attacker's cracked password is now useless
@@ -185,7 +185,7 @@ net user svc-sql Str0ng!P@ssw0rd#2026$Complex /domain
 net user user2 /active:no /domain
 ```
 
-### 5.4 Eradication ✅
+### 5.4 Eradication
 
 Remove the **root cause** — the SPN that made the account Kerberoastable in the first place:
 
@@ -197,11 +197,11 @@ setspn -l svc-sql
 
 > Changing the password alone (containment) still leaves the account attackable. Removing the SPN makes Kerberoasting **structurally impossible** for this account.
 
-### 5.5 Recovery ✅
+### 5.5 Recovery
 - Re-enabled `user2` with a new password after confirming the scope was limited.
 - Monitored Wazuh for further `rule.id:100100` alerts — none observed.
 
-### 5.6 Verification — re-attack fails ✅
+### 5.6 Verification — re-attack fails
 
 The decisive proof that the response worked. After removing the SPN, the same attack returns **"No entries found!"** — the account is no longer Kerberoastable:
 
@@ -241,9 +241,9 @@ impacket-GetUserSPNs -dc-ip 192.168.56.10 -request lab.local/user2:'Password123!
 
 This lab is built to grow — each attack is added as its own module with the same attack → detection → response structure.
 
-- ✅ **01 — Kerberoasting** (T1558.003) — this report
-- 🔜 **AES-ticket evasion** — bypassing the RC4-only rule and hardening detection to be behavior-based
-- 🔜 **02 — Pass-the-Hash** (T1550.002)
+- Done **01 — Kerberoasting** (T1558.003) — this report
+- Planned **AES-ticket evasion** — bypassing the RC4-only rule and hardening detection to be behavior-based
+- Planned **02 — Pass-the-Hash** (T1550.002)
 
 ---
 
