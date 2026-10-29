@@ -2,7 +2,7 @@
 
 **Home SOC + Active Directory Purple Team Lab**
 
-A full purple-team exercise in a self-built Active Directory lab: executing a Kerberoasting attack, engineering a custom detection rule in Wazuh, and running the complete NIST incident-response cycle — ending with a re-attack that proves the defenses hold.
+> **TL;DR** — In a self-built 4-VM Active Directory lab, I executed a Kerberoasting attack, discovered the SIEM missed it by default, engineered a custom Wazuh detection rule, and ran a full (simulated) NIST incident-response cycle — then re-ran the attack to prove the fix held. **My role: both attacker (red) and defender/detection engineer (blue).** This demonstrates offensive technique, detection engineering, and structured incident response end to end.
 
 **MITRE ATT&CK:** [T1558.003 — Steal or Forge Kerberos Tickets: Kerberoasting](https://attack.mitre.org/techniques/T1558/003/) | **Tactic:** Credential Access
 
@@ -17,6 +17,8 @@ A full purple-team exercise in a self-built Active Directory lab: executing a Ke
 | **Target** | `svc-sql` — a service account with an SPN and a weak password, on domain `lab.local`. |
 | **Detection** | Custom Wazuh rule (ID `100100`, level 12) matching Windows Event `4769` + RC4 encryption (`0x17`) + service name `svc-sql`. |
 | **Outcome** | Attack succeeded (ticket cracked offline), was detected in the SIEM, contained and eradicated, and a repeat attack failed — confirming the fix. |
+
+**Why it matters:** service accounts often hold elevated privileges and broad data access, so a single Kerberoasted credential can become a pivot into much of the domain. Detecting the request *as it happens* is the only reliable window, because the password cracking itself occurs offline and invisibly.
 
 ---
 
@@ -52,7 +54,7 @@ Password set to a weak value to mirror the common real-world problem of service 
 
 ## 3. Attack — Kerberoasting (MITRE T1558.003)
 
-> **Why it works:** Any authenticated domain user can request a Kerberos service ticket (TGS) for any account that has an SPN. The ticket is encrypted with the service account's password hash. The attacker requests the ticket, takes it offline, and brute-forces the password — with **no further interaction with the DC**, making the cracking phase invisible to the network.
+> **Why it works:** Any authenticated domain user can request a Kerberos service ticket (TGS) for any account that has an SPN. The ticket is encrypted with the service account's password hash. The attacker requests the ticket, takes it offline, and brute-forces the password — with no further interaction with the DC, making the cracking phase invisible to the network.
 
 ### Step 1 — Enumerate SPNs
 
@@ -82,11 +84,11 @@ The tool returns the RC4-encrypted TGS hash (`$krb5tgs$23$...` — `$23$` marks 
 john --wordlist=/usr/share/wordlists/rockyou.txt kerberoast.txt
 ```
 
-The service account password is recovered in seconds. In a real environment, the attacker now holds the credentials of a service account — often with elevated privileges and broad data access.
+The service account password is recovered. In a real environment, the attacker now holds the credentials of a service account — often with elevated privileges and broad data access.
 
 ![John crack](screenshots/03-john-crack.png)
 
-> **Lab note:** `rockyou.txt` contains `Password123` but not `Password123!`. A useful lesson — a "weak" password is only crackable if it (or a close variant) is in the wordlist. Real attackers build custom wordlists (company name, year, etc.).
+> **Wordlist note:** the account's exact password was a variant (`Password123!`) not present verbatim in stock `rockyou.txt`, so for this demonstration the variant was added to the wordlist to show a successful crack end-to-end. This is itself the real lesson: a "weak" password is only crackable if it — or a close mutation of it — is in the attacker's wordlist. Real attackers don't rely on stock lists; they generate target-specific candidates (company name, year, season) and apply rule-based mutations. The takeaway for defenders is that password *length and unpredictability* matter more than surface complexity.
 
 ---
 
@@ -130,6 +132,10 @@ Added to `/var/ossec/etc/rules/local_rules.xml`:
 </group>
 ```
 
+> **Rule ID `100100`:** Wazuh reserves IDs `100000+` for user-defined rules, so custom rules don't collide with built-in rules (`0–99999`) or get overwritten on update.
+
+> **False-positive consideration:** the three conditions are combined deliberately. A 4769 event alone is pure noise; but *RC4 encryption* **and** a *user service account* together are uncommon in a modern AES-first environment. That combination is what separates an attack from normal Kerberos traffic and keeps the rule's false-positive rate low. (A known RC4-dependent legacy app would be whitelisted by service name.)
+
 Validate and apply:
 
 ```bash
@@ -157,19 +163,19 @@ The attack surfaces on the SIEM's Threat Hunting dashboard — level-12 alerts, 
 
 ---
 
-## 5. Incident Response (NIST SP 800-61)
+## 5. Incident Response — Simulated (NIST SP 800-61)
 
-Acting as the SOC / defender after the alert fired.
+Acting as the SOC / defender after the alert fired, following the NIST IR lifecycle as a lab exercise (not a response to a real-world breach).
 
-### 5.1 Preparation
+### 5.1 Preparation ✅
 - Sysmon (SwiftOnSecurity config) on endpoints; Wazuh SIEM collecting Security + Sysmon logs.
 - Custom detection rule `100100` deployed with MITRE mapping.
 
-### 5.2 Identification
+### 5.2 Identification ✅
 - Rule `100100` fired a level-12 alert.
 - Triage: an RC4 TGS request for a *user* service account (`svc-sql`) from a workstation IP is not normal business activity → **confirmed genuine incident**, not a false positive.
 
-### 5.3 Containment
+### 5.3 Containment ✅
 
 ```cmd
 :: Invalidate the stolen credential — attacker's cracked password is now useless
@@ -179,7 +185,7 @@ net user svc-sql Str0ng!P@ssw0rd#2026$Complex /domain
 net user user2 /active:no /domain
 ```
 
-### 5.4 Eradication
+### 5.4 Eradication ✅
 
 Remove the **root cause** — the SPN that made the account Kerberoastable in the first place:
 
@@ -191,11 +197,11 @@ setspn -l svc-sql
 
 > Changing the password alone (containment) still leaves the account attackable. Removing the SPN makes Kerberoasting **structurally impossible** for this account.
 
-### 5.5 Recovery
+### 5.5 Recovery ✅
 - Re-enabled `user2` with a new password after confirming the scope was limited.
 - Monitored Wazuh for further `rule.id:100100` alerts — none observed.
 
-### 5.6 Verification — re-attack fails
+### 5.6 Verification — re-attack fails ✅
 
 The decisive proof that the response worked. After removing the SPN, the same attack returns **"No entries found!"** — the account is no longer Kerberoastable:
 
@@ -228,6 +234,16 @@ impacket-GetUserSPNs -dc-ip 192.168.56.10 -request lab.local/user2:'Password123!
 - **Blue team / Detection Engineering:** Windows event analysis (4769), audit policy configuration, SIEM rule authoring (Wazuh), MITRE ATT&CK mapping, closing a detection gap.
 - **Incident Response:** full NIST 800-61 lifecycle, containment/eradication decisions, verification by re-attack.
 - **Infrastructure & troubleshooting:** building a 4-VM AD lab, log-pipeline troubleshooting, NTP time synchronization, disk management, network routing.
+
+---
+
+## 7. Roadmap
+
+This lab is built to grow — each attack is added as its own module with the same attack → detection → response structure.
+
+- ✅ **01 — Kerberoasting** (T1558.003) — this report
+- 🔜 **AES-ticket evasion** — bypassing the RC4-only rule and hardening detection to be behavior-based
+- 🔜 **02 — Pass-the-Hash** (T1550.002)
 
 ---
 
