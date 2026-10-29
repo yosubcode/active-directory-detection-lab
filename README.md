@@ -46,7 +46,7 @@ setspn -l svc-sql
 ::   MSSQLSvc/dc01.lab.local:1433
 ```
 
-Password set to a weak value (`Password123!`) to mirror the common real-world problem of service accounts with stale, weak passwords.
+Password set to a weak value to mirror the common real-world problem of service accounts with stale, weak passwords.
 
 ---
 
@@ -62,13 +62,9 @@ From Kali, using a valid domain account's credentials:
 impacket-GetUserSPNs -dc-ip 192.168.56.10 lab.local/user1:'Password123!'
 ```
 
-```
-ServicePrincipalName          Name     PasswordLastSet             Delegation
-----------------------------  -------  --------------------------  ----------
-MSSQLSvc/dc01.lab.local:1433  svc-sql  2026-10-27 20:55:49         -
-```
+`svc-sql` is exposed as a Kerberoastable target:
 
-→ `svc-sql` is exposed as a Kerberoastable target.
+![SPN enumeration](screenshots/01-spn-enumeration.png)
 
 ### Step 2 — Request & extract the ticket ("roasting")
 
@@ -76,13 +72,9 @@ MSSQLSvc/dc01.lab.local:1433  svc-sql  2026-10-27 20:55:49         -
 impacket-GetUserSPNs -dc-ip 192.168.56.10 -request lab.local/user1:'Password123!'
 ```
 
-Output — the RC4-encrypted TGS hash:
+The tool returns the RC4-encrypted TGS hash (`$krb5tgs$23$...` — `$23$` marks RC4/etype 0x17, deliberately requested because it is far easier to crack than AES):
 
-```
-$krb5tgs$23$*svc-sql$LAB.LOCAL$lab.local/svc-sql*$de04f287...<snip>...c333c208bd75
-```
-
-> **Note on `$23$`:** this marks RC4 (etype 0x17) encryption — the attacker tool deliberately requests the weaker RC4 cipher because it is far easier to crack than AES.
+![Ticket extraction](screenshots/02-ticket-extraction.png)
 
 ### Step 3 — Crack offline
 
@@ -90,14 +82,11 @@ $krb5tgs$23$*svc-sql$LAB.LOCAL$lab.local/svc-sql*$de04f287...<snip>...c333c208bd
 john --wordlist=/usr/share/wordlists/rockyou.txt kerberoast.txt
 ```
 
-```
-Password123!     (svc-sql)
-1g 0:00:00:00 DONE
-```
+The service account password is recovered in seconds. In a real environment, the attacker now holds the credentials of a service account — often with elevated privileges and broad data access.
 
-→ **Service account password recovered.** In a real environment, the attacker now holds the credentials of a service account — often with elevated privileges and broad data access.
+![John crack](screenshots/03-john-crack.png)
 
-> **Lab note:** `rockyou.txt` contains `Password123` but not `Password123!`. This was a useful lesson — a "weak" password is only crackable if it (or a close variant) is in the wordlist. The exact value was added to the wordlist to demonstrate a successful crack, mirroring how real attackers build custom wordlists (company name, year, etc.).
+> **Lab note:** `rockyou.txt` contains `Password123` but not `Password123!`. A useful lesson — a "weak" password is only crackable if it (or a close variant) is in the wordlist. Real attackers build custom wordlists (company name, year, etc.).
 
 ---
 
@@ -105,7 +94,7 @@ Password123!     (svc-sql)
 
 ### 4.1 The attack artifact
 
-Each ticket request writes **Windows Security Event 4769** ("A Kerberos service ticket was requested") on the Domain Controller. The Kerberoasting signature:
+Each ticket request writes **Windows Security Event 4769** on the Domain Controller. The Kerberoasting signature:
 
 | Field | Normal traffic | Kerberoasting |
 |---|---|---|
@@ -150,26 +139,19 @@ sudo systemctl restart wazuh-manager
 
 ### 4.4 Detection confirmed
 
-Re-running the attack fired the rule. Key fields from the dashboard alert:
+Re-running the attack fires the rule. The alert in the Wazuh dashboard shows `rule.id: 100100`, `rule.level: 12`, the MITRE mapping (`T1558.003`, Credential Access), and the full context — who (`user1`), from where (`192.168.56.40`), against what (`svc-sql`, RC4 `0x17`):
 
-```
-rule.id:               100100
-rule.level:            12
-rule.description:      Kerberoasting detected: RC4 service ticket requested
-                       for svc-sql by user2@LAB.LOCAL from ::ffff:192.168.56.40
-rule.mitre.id:         T1558.003
-rule.mitre.technique:  Kerberoasting
-rule.mitre.tactic:     Credential Access
+![Wazuh alert 100100 — search](screenshots/04-wazuh-alert-100100-1.png)
 
-data.win.system.eventID:              4769
-data.win.eventdata.ticketEncryptionType: 0x17
-data.win.eventdata.serviceName:       svc-sql
-data.win.eventdata.targetUserName:    user2@LAB.LOCAL
-data.win.eventdata.ipAddress:         ::ffff:192.168.56.40
-agent.name:                           DC01
-```
+![Wazuh alert 100100 — expanded](screenshots/04-wazuh-alert-100100-2.png)
 
 The rule was verified against **both `user1` and `user2`**, confirming it keys on the **behavior** (`4769 + RC4 + svc-sql`) rather than a specific account.
+
+### 4.5 Threat Hunting dashboard
+
+The attack surfaces on the SIEM's Threat Hunting dashboard — level-12 alerts, a spike on the alert-level timeline, and automatic classification under MITRE ATT&CK (Kerberoasting / Credential Access):
+
+![Threat Hunting dashboard](screenshots/05-threat-hunting-dashboard.png)
 
 > **Lesson — IP is not reliable:** early runs logged the source as the gateway (`192.168.56.1`) instead of the real attacker (`192.168.56.40`), because traffic was routed through NAT. Network paths (NAT, proxies, gateways) can mask the true source IP, so **detection should rely on behavior, not IP.**
 
@@ -215,16 +197,18 @@ setspn -l svc-sql
 
 ### 5.6 Verification — re-attack fails ✅
 
-The decisive proof that the response worked:
+The decisive proof that the response worked. After removing the SPN, the same attack returns **"No entries found!"** — the account is no longer Kerberoastable:
+
+![Re-attack fails](screenshots/06-reattack-fails.png)
 
 ```bash
-# user2 — disabled account
-impacket-GetUserSPNs -dc-ip 192.168.56.10 -request lab.local/user2:'Password123!'
-#   [-] invalidCredentials ... data 533      ← account disabled (containment works)
-
 # user1 — still valid, but target is gone
 impacket-GetUserSPNs -dc-ip 192.168.56.10 -request lab.local/user1:'Password123!'
 #   No entries found!                        ← no SPN = not Kerberoastable (eradication works)
+
+# user2 — disabled account
+impacket-GetUserSPNs -dc-ip 192.168.56.10 -request lab.local/user2:'Password123!'
+#   [-] invalidCredentials ... data 533      ← account disabled (containment works)
 ```
 
 ### 5.7 Lessons Learned
@@ -244,28 +228,6 @@ impacket-GetUserSPNs -dc-ip 192.168.56.10 -request lab.local/user1:'Password123!
 - **Blue team / Detection Engineering:** Windows event analysis (4769), audit policy configuration, SIEM rule authoring (Wazuh), MITRE ATT&CK mapping, closing a detection gap.
 - **Incident Response:** full NIST 800-61 lifecycle, containment/eradication decisions, verification by re-attack.
 - **Infrastructure & troubleshooting:** building a 4-VM AD lab, log-pipeline troubleshooting, NTP time synchronization, disk management, network routing.
-
----
-
-## 7. Repository Structure (suggested)
-
-```
-kerberoasting-detection/
-├── README.md                     # this report
-├── rules/
-│   └── local_rules.xml           # custom Wazuh rule 100100
-├── attack/
-│   └── commands.md               # attack commands + sample output
-├── detection/
-│   └── alert-sample.json         # full Wazuh alert JSON
-└── screenshots/
-    ├── 01-spn-enumeration.png
-    ├── 02-ticket-extraction.png
-    ├── 03-john-crack.png
-    ├── 04-wazuh-alert-100100.png
-    ├── 05-threat-hunting-dashboard.png
-    └── 06-reattack-fails.png
-```
 
 ---
 
