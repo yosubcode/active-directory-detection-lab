@@ -2,9 +2,9 @@
 
 **Home SOC + Active Directory Purple Team Lab**
 
-In a self-built 4-VM Active Directory lab, I ran a Kerberoasting attack, found that the SIEM missed it under its default configuration, wrote a custom Wazuh rule to close the gap, and worked through the NIST incident-response lifecycle as a lab exercise. I then re-ran the attack to confirm the fix held. After that I showed how an attacker evades the rule by switching to AES encryption, and I rebuilt the detection on a behavioral signal so it survives the bypass. I played both the attacker and the defender.
+In a self-built 4-VM Active Directory lab, I ran a Kerberoasting attack, found that the SIEM missed it under its default configuration, wrote a custom Wazuh rule to close the gap, and worked through the NIST incident-response lifecycle as a lab exercise. I then re-ran the attack to confirm the fix held. After that I showed how an attacker evades the rule by switching to AES encryption, and I rebuilt the detection on a behavioral signal so it survives the bypass. I also validated that the rule stays quiet on normal traffic, added a second Kerberos credential attack (AS-REP Roasting) with its own detection, and rewrote all three detections as vendor-neutral Sigma rules. I played both the attacker and the defender.
 
-**MITRE ATT&CK:** [T1558.003 — Steal or Forge Kerberos Tickets: Kerberoasting](https://attack.mitre.org/techniques/T1558/003/) · Tactic: Credential Access
+**MITRE ATT&CK:** [T1558.003 — Kerberoasting](https://attack.mitre.org/techniques/T1558/003/) and [T1558.004 — AS-REP Roasting](https://attack.mitre.org/techniques/T1558/004/) · Tactic: Credential Access
 
 ---
 
@@ -15,7 +15,7 @@ In a self-built 4-VM Active Directory lab, I ran a Kerberoasting attack, found t
 | Objective | Reproduce a Kerberoasting attack against a vulnerable service account, detect it with a custom SIEM rule, and respond using the NIST IR framework. |
 | Attacker | Kali Linux (`192.168.56.40`), using a valid low-privilege domain account (`user1` / `user2`), simulating an attacker who already has an initial foothold ("assume breach"). |
 | Target | `svc-sql`, a service account with an SPN and a weak password, on domain `lab.local`. |
-| Detection | Custom Wazuh rules: `100100` (level 12) for classic RC4 Kerberoasting, and `100101` (level 12) for the evasion-resistant behavioral variant. |
+| Detection | Custom Wazuh rules: `100100` for classic RC4 Kerberoasting, `100101` for the evasion-resistant behavioral variant, and `100102` for AS-REP Roasting. All three also written as vendor-neutral Sigma rules. |
 | Outcome | The attack succeeded, was detected, contained, and eradicated, and a repeat attack failed. An AES-based evasion that bypassed the first rule was then caught by a hardened behavioral rule. |
 
 Service accounts often hold elevated privileges and broad data access, so one Kerberoasted credential can become a pivot into much of the domain. The only reliable window to detect it is the moment of the request, because the password cracking happens offline and leaves no trace on the network.
@@ -309,21 +309,167 @@ Keying on `svc-sql` works because it is a decoy account with no legitimate ticke
 
 ---
 
-## 7. Skills Demonstrated
+## 7. Detection Quality — False Positive Validation
 
-- Red team: AD enumeration, Kerberoasting (Impacket), offline hash cracking (John the Ripper), custom wordlists, and detection evasion by avoiding the RC4 downgrade.
-- Blue team / detection engineering: Windows event analysis (4769), audit policy configuration, SIEM rule authoring (Wazuh), MITRE ATT&CK mapping, closing a detection gap, and hardening a signature rule into a behavioral one.
+A detection rule is only useful if it stays quiet when nothing is wrong. A rule that fires on normal activity trains the analyst to ignore it, so before trusting rule `100100` I checked its precision against a baseline of ordinary traffic.
+
+The DC generates 4769 events constantly in normal operation. Rule `100100` only fires on the combination `4769 + RC4 (0x17) + svc-sql`, so the test is whether any of that normal traffic hits all three conditions at once.
+
+On DC01, counting 4769 events in a recent window, then filtering for the target account:
+
+```powershell
+# All service-ticket requests in the last 10 minutes
+Get-WinEvent -FilterHashtable @{LogName='Security'; ID=4769; StartTime=(Get-Date).AddMinutes(-10)} | Measure-Object | Select-Object Count
+#   Count : 4
+
+# Of those, how many involve svc-sql — what the rule keys on
+Get-WinEvent -FilterHashtable @{LogName='Security'; ID=4769; StartTime=(Get-Date).AddMinutes(-10)} | Where-Object { $_.Message -match 'svc-sql' } | Measure-Object | Select-Object Count
+#   Count : 0
+```
+
+The four normal 4769 events are the domain's own machine accounts requesting tickets (service name `WIN-...$`, encryption `0x12` AES, client `::1`), which is routine Kerberos activity. None target `svc-sql` and none use RC4, so rule `100100` produces zero alerts on this baseline.
+
+![False positive validation](screenshots/13-fp-validation.png)
+
+The rule fired on every real attack in Section 4 and fires zero times on this baseline, because of the three-part condition. A rule on `4769` alone would bury the analyst, while `4769 + RC4 + svc-sql` is specific enough that a hit is almost certainly the attack. The trade-off is deliberate: the rule gives up some recall (an attacker using AES against a real account slips past, which Section 6 addresses) for high precision, the right property for an alert a human has to triage.
+
+---
+
+## 8. AS-REP Roasting — A Second Kerberos Attack (MITRE T1558.004)
+
+Kerberoasting is not the only offline credential attack against Kerberos. AS-REP Roasting targets a different weakness, so I added it as a second attack in the same module, with its own detection and verification.
+
+### 8.1 The weakness
+
+When an account requests a Kerberos TGT, it normally proves it knows its password first by encrypting a timestamp. This step is called pre-authentication. If an account has pre-authentication disabled (the `DoesNotRequirePreAuth` flag), the KDC hands out a TGT (the AS-REP) to anyone who asks, and part of that reply is encrypted with the account's password hash. An attacker requests it and cracks it offline, exactly like Kerberoasting, but without needing any valid domain credentials to begin.
+
+| | Kerberoasting (T1558.003) | AS-REP Roasting (T1558.004) |
+|---|---|---|
+| Target | accounts with an SPN | accounts with pre-auth disabled |
+| Event | 4769 (service ticket) | 4768 (authentication ticket) |
+| Needs valid credentials | yes (any domain user) | no |
+| Crackable material | TGS hash | AS-REP hash |
+
+### 8.2 Vulnerable target setup
+
+I created `svc-legacy` as an account with pre-authentication disabled. This represents a real misconfiguration, often left behind for old applications that cannot perform pre-auth:
+
+```powershell
+# On DC01 — disable Kerberos pre-authentication for the account
+Set-ADAccountControl svc-legacy -DoesNotRequirePreAuth $true
+
+# Verify the flag is set
+Get-ADUser svc-legacy -Properties DoesNotRequirePreAuth | Select-Object Name, DoesNotRequirePreAuth
+#   DoesNotRequirePreAuth : True
+```
+
+![AS-REP target setup](screenshots/14-asrep-target.png)
+
+### 8.3 Attack
+
+From Kali, with no credentials at all, requesting the AS-REP for the exposed account:
+
+```bash
+impacket-GetNPUsers -dc-ip 192.168.56.10 -request -no-pass lab.local/svc-legacy
+```
+
+- `impacket-GetNPUsers` — the Impacket tool for AS-REP Roasting (NP = "no pre-auth")
+- `-dc-ip 192.168.56.10` — the domain controller to ask
+- `-request` — actually request the AS-REP, not just list vulnerable accounts
+- `-no-pass` — send no password, which is the whole point: pre-auth is off
+
+The DC returns the crackable AS-REP hash (`$krb5asrep$...`):
+
+![AS-REP hash obtained](screenshots/15-asrep-hash.png)
+
+Cracking it offline with John:
+
+```bash
+john --wordlist=/usr/share/wordlists/rockyou.txt asrep.txt
+```
+
+The password is recovered (`Password123!`). No valid domain account was used at any point, so one account with pre-auth disabled is enough to hand a crackable credential to an attacker who has no foothold yet.
+
+![AS-REP crack](screenshots/16-asrep-crack.png)
+
+### 8.4 Detection
+
+AS-REP Roasting lands on a different event from Kerberoasting. The TGT request writes Event 4768 on the DC, and the distinguishing field is the pre-authentication type.
+
+| Field | Normal TGT request | AS-REP Roasting |
+|---|---|---|
+| `eventID` | 4768 | 4768 |
+| `preAuthType` | `2` (pre-auth performed) | `0` (no pre-auth) |
+
+Confirming the signal on DC01, the 4768 event for `svc-legacy` shows the attack: the request came from the Kali attacker (`::ffff:192.168.56.40`) and Pre-Authentication Type is `0`:
+
+![Event 4768 with PreAuthType 0](screenshots/17-asrep-4768.png)
+
+The custom Wazuh rule keys on that pre-auth type, which is the behavior the attack cannot avoid: to roast an account, pre-auth has to be off, so a 4768 with pre-auth type 0 is the signature.
+
+```xml
+<group name="asrep-roasting,attack,">
+  <rule id="100102" level="12">
+    <if_group>windows_security</if_group>
+    <field name="win.system.eventID">^4768$</field>
+    <field name="win.eventdata.preAuthType">^0$</field>
+    <description>AS-REP Roasting detected: TGT without pre-auth for $(win.eventdata.targetUserName) from $(win.eventdata.ipAddress)</description>
+    <mitre>
+      <id>T1558.004</id>
+    </mitre>
+  </rule>
+</group>
+```
+
+![Rule 100102 in local_rules.xml](screenshots/18-asrep-rule.png)
+
+A note on precision: any account with pre-auth disabled generates this event on every logon, so in production the rule doubles as an inventory of accounts that need fixing. The right response is to re-enable pre-auth on those accounts, not to whitelist them, because the misconfiguration is the problem.
+
+### 8.5 Verification
+
+After restarting the manager and re-running the attack, rule `100102` fires. The Wazuh dashboard shows `rule.id:100102` with the full context: target `svc-legacy`, event 4768, pre-auth type 0, from the Kali IP:
+
+![AS-REP detected in Wazuh](screenshots/19-asrep-detected.png)
+
+The detection keys on `preAuthType: 0` rather than on the account name or the cipher, so it catches AS-REP Roasting against any account, not only this one.
+
+---
+
+## 9. Detection-as-Code — Portable Sigma Rules
+
+The three Wazuh rules above are written in Wazuh's own XML format, which only Wazuh understands. Sigma is a vendor-neutral format for detection rules: one YAML file that converts to Splunk, Elastic, Microsoft Sentinel, and other SIEMs. Writing detections as Sigma keeps them portable and version-controllable, the "detection-as-code" approach that detection-engineering teams increasingly expect.
+
+I rewrote all three detections as Sigma rules, in [`sigma/`](sigma/):
+
+| Sigma file | Mirrors | Detects |
+|---|---|---|
+| `kerberoasting_rc4.yml` | rule 100100 | RC4 service ticket for svc-sql (4769 + 0x17) |
+| `kerberoasting_decoy_account.yml` | rule 100101 | any service ticket for the decoy account (behavioral) |
+| `asrep_roasting.yml` | rule 100102 | TGT without pre-auth (4768 + preAuthType 0) |
+
+Each rule carries its MITRE ATT&CK technique, a description, and documented false positives. Because Sigma is backend-agnostic, the same file that runs here on Wazuh converts to a Splunk search or an Elastic query without rewriting the detection logic, so the work is reusable across environments instead of locked to one SIEM.
+
+---
+
+## 10. Skills Demonstrated
+
+- Red team: AD enumeration, Kerberoasting and AS-REP Roasting (Impacket), offline hash cracking (John the Ripper), custom wordlists, and detection evasion by avoiding the RC4 downgrade.
+- Blue team / detection engineering: Windows event analysis (4768, 4769), audit policy configuration, SIEM rule authoring (Wazuh), MITRE ATT&CK mapping, false-positive and precision validation, closing a detection gap, hardening a signature rule into a behavioral one, and writing portable detections as Sigma (detection-as-code).
 - Incident response: the NIST 800-61 lifecycle, containment and eradication decisions, and verification by re-attack.
 - Infrastructure and troubleshooting: building a 4-VM AD lab, log-pipeline troubleshooting, NTP time synchronization, disk management, and network routing.
 
 ---
 
-## 8. Roadmap
+## 11. Roadmap
 
 Each attack is added as its own module with the same attack, detection, response structure.
 
 - 01 — Kerberoasting (T1558.003), complete, this report
 - Kerberoasting AES evasion and behavioral hardening, complete, Section 6
+- False-positive validation of the detection, complete, Section 7
+- AS-REP Roasting (T1558.004), complete, Section 8
+- Detection-as-code with Sigma, complete, Section 9
+- gMSA hardening against Kerberoasting, planned
 - 02 — Pass-the-Hash (T1550.002), planned
 
 ---
