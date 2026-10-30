@@ -25,7 +25,9 @@ Isolated VirtualBox network (`192.168.56.0/24`, Host-Only, static IPs):
 
 | # | Attack | MITRE | Status |
 |---|---|---|---|
-| 01 | [Kerberoasting](01-kerberoasting/) | T1558.003 | Complete |
+| 01 | [Kerberoasting + AS-REP Roasting](01-kerberoasting/) | T1558.003, T1558.004 | Complete |
+
+Module 01 also covers AES-downgrade evasion and behavioral hardening, false-positive validation, and the detections rewritten as vendor-neutral [Sigma rules](01-kerberoasting/sigma/).
 
 *More attacks in progress.*
 
@@ -33,8 +35,8 @@ Isolated VirtualBox network (`192.168.56.0/24`, Host-Only, static IPs):
 
 ## Skills Demonstrated
 
-- **Red team:** AD enumeration, credential attacks (Impacket), offline hash cracking.
-- **Blue team / Detection Engineering:** Windows event analysis, custom Wazuh rule authoring, MITRE ATT&CK mapping, closing detection gaps.
+- **Red team:** AD enumeration, Kerberoasting and AS-REP Roasting (Impacket), offline hash cracking.
+- **Blue team / Detection Engineering:** Windows event analysis, custom Wazuh rule authoring, MITRE ATT&CK mapping, false-positive validation, closing detection gaps, and portable detections as Sigma (detection-as-code).
 - **Incident Response:** full NIST SP 800-61 lifecycle, verified by re-attack.
 - **Infrastructure:** multi-VM AD lab, log-pipeline troubleshooting, time sync, network routing.
 
