@@ -2,7 +2,7 @@
 
 **Home SOC + Active Directory Purple Team Lab**
 
-In a self-built 4-VM Active Directory lab, I ran a Kerberoasting attack, found that the SIEM missed it under its default configuration, wrote a custom Wazuh rule to close the gap, and worked through the NIST incident-response lifecycle as a lab exercise. I then re-ran the attack to confirm the fix held. After that I showed how an attacker evades the rule by switching to AES encryption, and I rebuilt the detection on a behavioral signal so it survives the bypass. I also validated that the rule stays quiet on normal traffic, added a second Kerberos credential attack (AS-REP Roasting) with its own detection, and rewrote all three detections as vendor-neutral Sigma rules. I played both the attacker and the defender.
+In a self-built 4-VM Active Directory lab, I ran a Kerberoasting attack, found that the SIEM missed it under its default configuration, wrote a custom Wazuh rule to close the gap, and worked through the NIST incident-response lifecycle as a lab exercise. I then re-ran the attack to confirm the fix held. After that I showed how an attacker evades the rule by switching to AES encryption, and I rebuilt the detection on a behavioral signal so it survives the bypass. I also validated that the rule stays quiet on normal traffic, added a second Kerberos credential attack (AS-REP Roasting) with its own detection, and rewrote all three detections as vendor-neutral Sigma rules, and finished by building a gMSA that structurally defeats the attack. I played both the attacker and the defender.
 
 **MITRE ATT&CK:** [T1558.003 — Kerberoasting](https://attack.mitre.org/techniques/T1558/003/) and [T1558.004 — AS-REP Roasting](https://attack.mitre.org/techniques/T1558/004/) · Tactic: Credential Access
 
@@ -29,7 +29,7 @@ In a self-built 4-VM Active Directory lab, I ran a Kerberoasting attack, found t
 | Attacker | Kali Linux (`192.168.56.40`), using a valid low-privilege domain account (`user1` / `user2`), simulating an attacker who already has an initial foothold ("assume breach"). |
 | Target | `svc-sql`, a service account with an SPN and a weak password, on domain `lab.local`. |
 | Detection | Custom Wazuh rules: `100100` for classic RC4 Kerberoasting, `100101` for the evasion-resistant behavioral variant, and `100102` for AS-REP Roasting. All three also written as vendor-neutral Sigma rules. |
-| Outcome | The attack succeeded, was detected, contained, and eradicated, and a repeat attack failed. An AES-based evasion that bypassed the first rule was then caught by a hardened behavioral rule. |
+| Outcome | The attack succeeded, was detected, contained, and eradicated, and a repeat attack failed. An AES-based evasion that bypassed the first rule was then caught by a hardened behavioral rule. A gMSA built as the structural fix could not be Kerberoasted at all. |
 
 Service accounts often hold elevated privileges and broad data access, so one Kerberoasted credential can become a pivot into much of the domain. The only reliable window to detect it is the moment of the request, because the password cracking happens offline and leaves no trace on the network.
 
@@ -516,16 +516,98 @@ Each rule carries its MITRE ATT&CK technique, a description, and documented fals
 
 ---
 
-## 10. Skills Demonstrated
+## 10. Structural Prevention — gMSA Defeats Kerberoasting
+
+**Key terms — prevention**
+
+| Term | What it is |
+|---|---|
+| gMSA (group Managed Service Account) | A service account whose password Active Directory generates and rotates automatically, so no human ever sets or knows it. |
+| KDS root key | A domain-wide master key the DC uses to generate gMSA passwords. Created once, before any gMSA. |
+| Managed password | The gMSA's password: a 256-bit value AD generates and rotates on a schedule (default 30 days). |
+| Prevention vs detection | Detection catches an attack that happens; prevention stops it from happening at all. |
+
+Every attack so far worked because `svc-sql` had a weak, human-set password that a wordlist cracked in minutes. gMSA removes that root cause: Active Directory generates the password as a 256-bit random value and rotates it on a schedule, so there is no human-chosen password to be weak and nothing a wordlist can contain.
+
+A fair question is whether automatic rotation hurts availability, since a normal service breaks when its password changes out from under it. It does not. The password lives only in AD, and the hosts authorized to run the service retrieve the current one automatically whenever it rotates. Rotation is transparent to the service, so gMSA raises confidentiality (a strong secret) without the availability cost that makes teams leave ordinary service-account passwords static and weak.
+
+### 10.1 Build the gMSA
+
+A gMSA needs a one-time domain master key (the KDS root key) before it can exist:
+
+```powershell
+# On DC01 — create the KDS root key, effective immediately (lab shortcut)
+Add-KdsRootKey -EffectiveTime ((Get-Date).AddHours(-10))
+```
+
+Then create the account with an SPN on purpose, so it is a valid Kerberoasting target under the same conditions that made `svc-sql` attackable:
+
+```powershell
+New-ADServiceAccount -Name gmsa-sql -DNSHostName gmsa-sql.lab.local `
+  -ServicePrincipalNames "MSSQLSvc/gmsa-sql.lab.local:1433" `
+  -PrincipalsAllowedToRetrieveManagedPassword "Domain Computers"
+```
+
+The account is created as a true gMSA (`ObjectClass: msDS-GroupManagedServiceAccount`) with the SPN attached:
+
+![gMSA created](screenshots/20-gmsa-created.png)
+
+### 10.2 Attack it — three ways it fails
+
+Running the same Kerberoasting attack from Section 3 against the gMSA fails at three separate points.
+
+**1. It is invisible to the standard sweep.** The usual enumeration lists only `svc-sql`, not the gMSA, because Kerberoast tooling filters for ordinary user accounts and a gMSA is classed as a machine account:
+
+```bash
+impacket-GetUserSPNs -dc-ip 192.168.56.10 lab.local/user1:'Password123!'
+#   svc-sql      ...        <- gmsa-sql does not appear
+```
+
+**2. It cannot be targeted directly either.** Naming the account explicitly still returns nothing, because the same account-type filter excludes it:
+
+```bash
+impacket-GetUserSPNs -dc-ip 192.168.56.10 -request-user 'gmsa-sql$' lab.local/user1:'Password123!'
+#   No entries found!
+```
+
+![Kerberoasting the gMSA fails](screenshots/21-gmsa-kerberoast-fails.png)
+
+**3. It generates no detectable event.** Because the attack never reached the ticket-request stage, the DC logged zero Event 4769 for the gMSA, so there was nothing for the detection rules to catch:
+
+```powershell
+# On DC01 — count 4769 events for gmsa-sql in the attack window
+Get-WinEvent -FilterHashtable @{LogName='Security'; ID=4769; StartTime=(Get-Date).AddMinutes(-20)} |
+  Where-Object { $_.Message -match 'gmsa-sql' } | Measure-Object | Select-Object Count
+#   Count : 0
+```
+
+![No 4769 generated for the gMSA](screenshots/22-gmsa-no-4769.png)
+
+### 10.3 Why it holds even against better tooling
+
+A specialized tool such as Rubeus, which targets by SPN, can still request the ticket and obtain the hash. It does not matter. The gMSA's password is a 256-bit value generated and rotated by AD, so offline cracking is infeasible regardless of the tool. `svc-sql` was cracked in minutes; the gMSA password cannot be, because a strong machine-managed secret removes the offline-cracking step the attack depends on.
+
+### 10.4 Prevention vs detection
+
+This is the one module where the SIEM stays quiet by design. The detection rules in Sections 4, 6, and 8 catch Kerberoasting and AS-REP Roasting when they happen. gMSA sits one layer earlier and stops the attack before it produces the Event 4769 those rules key on. A complete posture uses both: prevention for the accounts that can be a gMSA, and detection for the service accounts that cannot.
+
+| Account | Password | Kerberoastable? | Result |
+|---|---|---|---|
+| `svc-sql` | human-set, weak | yes | cracked in minutes (Sections 3–4) |
+| `gmsa-sql` | AD-managed, 256-bit, rotated | no (not even enumerable) | attack fails at every stage |
+
+---
+
+## 11. Skills Demonstrated
 
 - Red team: AD enumeration, Kerberoasting and AS-REP Roasting (Impacket), offline hash cracking (John the Ripper), custom wordlists, and detection evasion by avoiding the RC4 downgrade.
-- Blue team / detection engineering: Windows event analysis (4768, 4769), audit policy configuration, SIEM rule authoring (Wazuh), MITRE ATT&CK mapping, false-positive and precision validation, closing a detection gap, hardening a signature rule into a behavioral one, and writing portable detections as Sigma (detection-as-code).
+- Blue team / detection engineering: Windows event analysis (4768, 4769), audit policy configuration, SIEM rule authoring (Wazuh), MITRE ATT&CK mapping, false-positive and precision validation, closing a detection gap, hardening a signature rule into a behavioral one, writing portable detections as Sigma (detection-as-code), and structural prevention with a gMSA.
 - Incident response: the NIST 800-61 lifecycle, containment and eradication decisions, and verification by re-attack.
 - Infrastructure and troubleshooting: building a 4-VM AD lab, log-pipeline troubleshooting, NTP time synchronization, disk management, and network routing.
 
 ---
 
-## 11. Roadmap
+## 12. Roadmap
 
 Each attack is added as its own module with the same attack, detection, response structure.
 
@@ -534,7 +616,7 @@ Each attack is added as its own module with the same attack, detection, response
 - False-positive validation of the detection, complete, Section 7
 - AS-REP Roasting (T1558.004), complete, Section 8
 - Detection-as-code with Sigma, complete, Section 9
-- gMSA hardening against Kerberoasting, planned
+- gMSA structural prevention, complete, Section 10
 - 02 — Pass-the-Hash (T1550.002), planned
 
 ---
