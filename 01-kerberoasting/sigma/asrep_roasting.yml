@@ -1,0 +1,27 @@
+title: AS-REP Roasting - TGT Requested Without Pre-Authentication
+id: 7a1e9f20-0003-4a00-9000-000000000003
+status: experimental
+description: >
+  Detects AS-REP Roasting: a Kerberos TGT (AS-REQ) requested for an account that
+  has pre-authentication disabled. Pre-Authentication Type 0 means no pre-auth was
+  performed, so the KDC returned a crackable AS-REP without any credentials. Keyed
+  on the pre-auth behavior, not the cipher, so it survives an encryption change.
+  Mirrors Wazuh rule 100102.
+references:
+  - https://attack.mitre.org/techniques/T1558/004/
+author: Yosub
+date: 2026/10/30
+tags:
+  - attack.credential_access
+  - attack.t1558.004
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 4768
+    PreAuthType: '0'
+  condition: selection
+falsepositives:
+  - Legacy accounts intentionally configured without Kerberos pre-authentication (should be remediated, not whitelisted)
+level: high

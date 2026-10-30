@@ -1,0 +1,27 @@
+title: Kerberoasting - RC4 Service Ticket for Decoy Account
+id: 7a1e9f20-0001-4a00-9000-000000000001
+status: experimental
+description: >
+  Detects a classic Kerberoasting attack: an RC4-encrypted Kerberos service
+  ticket (TGS) requested for the svc-sql service account. RC4 (encryption type
+  0x17) is requested by attacker tooling because it is far faster to crack
+  offline than AES. Mirrors Wazuh rule 100100.
+references:
+  - https://attack.mitre.org/techniques/T1558/003/
+author: Yosub
+date: 2026/10/30
+tags:
+  - attack.credential_access
+  - attack.t1558.003
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 4769
+    TicketEncryptionType: '0x17'
+    ServiceName: 'svc-sql'
+  condition: selection
+falsepositives:
+  - Legacy applications that genuinely require RC4 for this specific service account
+level: high
