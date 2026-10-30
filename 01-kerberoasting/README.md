@@ -10,6 +10,19 @@ In a self-built 4-VM Active Directory lab, I ran a Kerberoasting attack, found t
 
 ## 1. Summary
 
+**Key terms — Kerberos basics** (used throughout this report)
+
+| Term | What it is |
+|---|---|
+| Kerberos | The login protocol Active Directory uses: you authenticate once and get tickets instead of resending your password. |
+| Domain Controller (DC) | The server that runs Active Directory and issues the tickets. |
+| KDC (Key Distribution Center) | The part of the DC that actually issues Kerberos tickets. |
+| TGT (Ticket-Granting Ticket) | The "master" ticket you get at login, used to request service tickets. |
+| TGS (service ticket) | A ticket for one specific service, encrypted with that service account's password hash. |
+| SPN (Service Principal Name) | The label that ties a service to the account running it. Only an account with an SPN can be Kerberoasted. |
+| Service account | An account used by a program or service rather than a person (for example `svc-sql`). |
+| SIEM | The system that collects logs and raises alerts. Here it is Wazuh. |
+
 | | |
 |---|---|
 | Objective | Reproduce a Kerberoasting attack against a vulnerable service account, detect it with a custom SIEM rule, and respond using the NIST IR framework. |
@@ -70,6 +83,15 @@ impacket-GetUserSPNs -dc-ip 192.168.56.10 lab.local/user1:'Password123!'
 
 ### Step 2 — Request and extract the ticket
 
+**Key terms — encryption**
+
+| Term | What it is |
+|---|---|
+| etype (encryption type) | The cipher a ticket is encrypted with, shown as a hex code in the logs. |
+| RC4 (`0x17`, hash `$23$`) | Legacy weak cipher. Cracks fast offline, so attacker tools request it on purpose. |
+| AES256 / AES128 (`0x12` / `0x11`, hash `$18$` / `$17$`) | Modern strong ciphers. Much slower to crack. |
+| Hash (`$krb5tgs$...`) | The encrypted part of the ticket. Cracking it offline recovers the password. |
+
 ```bash
 impacket-GetUserSPNs -dc-ip 192.168.56.10 -request lab.local/user1:'Password123!'
 ```
@@ -93,6 +115,14 @@ The account's exact password (`Password123!`) was not in stock `rockyou.txt`, so
 ---
 
 ## 4. Detection Engineering
+
+**Key terms — detection**
+
+| Term | What it is |
+|---|---|
+| Event 4769 | The Windows Security log written for a Kerberos service-ticket (TGS) request. |
+| Wazuh alert level | A 0–15 severity score. Level 0 is logged but never alerted; higher levels raise an alert. |
+| Detection gap | An attack that generates logs but produces no alert, so it slips past the SIEM. |
 
 ### 4.1 The attack artifact
 
@@ -228,6 +258,15 @@ impacket-GetUserSPNs -dc-ip 192.168.56.10 -request lab.local/user2:'Password123!
 
 ## 6. Detection Evasion and Hardening — AES bypass
 
+**Key terms — evasion**
+
+| Term | What it is |
+|---|---|
+| Downgrade | The attacker tool requesting the weaker RC4 cipher on purpose, instead of AES. |
+| Signature-based detection | Keys on a specific indicator (RC4 `0x17`). Precise, but easy to evade. |
+| Behavior-based detection | Keys on the action itself (requesting a ticket for the target account). Harder to evade. |
+| Honey-SPN (honeytoken) | A decoy service account no real service uses, so any request for it is suspicious. |
+
 The rule in Section 4 keys on RC4 encryption (`0x17`), a signature-based detection, and signatures can be evaded. This section shows the evasion and the fix.
 
 ![Attack flow: RC4 caught by rule 100100, AES evades it and is caught by rule 100101](screenshots/12-detection-flow.png)
@@ -311,6 +350,14 @@ Keying on `svc-sql` works because it is a decoy account with no legitimate ticke
 
 ## 7. Detection Quality — False Positive Validation
 
+**Key terms — detection quality**
+
+| Term | What it is |
+|---|---|
+| False positive | A normal event the rule wrongly flags as an attack. |
+| Precision | How often an alert is a real attack. Few false positives means high precision. |
+| Recall | How many of the real attacks the rule actually catches. Misses lower it. |
+
 A detection rule is only useful if it stays quiet when nothing is wrong. A rule that fires on normal activity trains the analyst to ignore it, so before trusting rule `100100` I checked its precision against a baseline of ordinary traffic.
 
 The DC generates 4769 events constantly in normal operation. Rule `100100` only fires on the combination `4769 + RC4 (0x17) + svc-sql`, so the test is whether any of that normal traffic hits all three conditions at once.
@@ -336,6 +383,16 @@ The rule fired on every real attack in Section 4 and fires zero times on this ba
 ---
 
 ## 8. AS-REP Roasting — A Second Kerberos Attack (MITRE T1558.004)
+
+**Key terms — AS-REP Roasting**
+
+| Term | What it is |
+|---|---|
+| Pre-authentication | The step where the client proves it knows the password before the KDC issues a TGT. |
+| Event 4768 | The Windows Security log written for a Kerberos TGT (authentication) request. |
+| AS-REP | The login reply the KDC returns, encrypted with the account's password hash. |
+| PreAuthType 0 | No pre-auth was used (normal is type 2). This is the AS-REP Roasting signal. |
+| DoesNotRequirePreAuth | The AD account flag that disables pre-auth and makes an account roastable. |
 
 Kerberoasting is not the only offline credential attack against Kerberos. AS-REP Roasting targets a different weakness, so I added it as a second attack in the same module, with its own detection and verification.
 
@@ -436,6 +493,14 @@ The detection keys on `preAuthType: 0` rather than on the account name or the ci
 ---
 
 ## 9. Detection-as-Code — Portable Sigma Rules
+
+**Key terms — detection-as-code**
+
+| Term | What it is |
+|---|---|
+| Sigma | A vendor-neutral detection-rule format (written in YAML) that converts to any SIEM. |
+| Detection-as-code | Treating detections like software: a standard format, version-controlled in git, reusable. |
+| SPL / KQL | The query languages of Splunk and Microsoft Sentinel. |
 
 The three Wazuh rules above are written in Wazuh's own XML format, which only Wazuh understands. Sigma is a vendor-neutral format for detection rules: one YAML file that converts to Splunk, Elastic, Microsoft Sentinel, and other SIEMs. Writing detections as Sigma keeps them portable and version-controllable, the "detection-as-code" approach that detection-engineering teams increasingly expect.
 
