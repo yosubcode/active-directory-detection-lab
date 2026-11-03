@@ -1,0 +1,37 @@
+title: Pass-the-Hash - Remote NTLM Logon by Privileged Account
+id: 8f3a1c6e-2b4d-4e9a-9c1f-7a2e5d0b1234
+status: experimental
+description: >
+  Detects a network logon (Type 3) authenticated with NTLM for a sensitive
+  account. In an environment that uses Kerberos by default, a domain admin
+  account logging on over the network with NTLM is a strong Pass-the-Hash
+  indicator. Portable version of Wazuh rule 100103 (which upgrades built-in
+  rule 92652 to high severity).
+references:
+  - https://attack.mitre.org/techniques/T1550/002/
+author: yosubcode
+date: 2026-11-01
+tags:
+  - attack.lateral-movement
+  - attack.t1550.002
+  - attack.t1078.002
+logsource:
+  product: windows
+  service: security
+detection:
+  selection:
+    EventID: 4624
+    LogonType: 3
+    AuthenticationPackageName: 'NTLM'
+    LogonProcessName: 'NtLmSsp'
+  selection_account:
+    TargetUserName:
+      - 'Administrator'
+      # add other privileged / decoy accounts here
+  filter_machine:
+    TargetUserName|endswith: '$'   # exclude machine-account logons
+  condition: selection and selection_account and not filter_machine
+falsepositives:
+  - Legitimate NTLM fallback for admin tools on hosts where Kerberos is unavailable
+  - Vulnerability scanners or backup agents authenticating with NTLM
+level: high

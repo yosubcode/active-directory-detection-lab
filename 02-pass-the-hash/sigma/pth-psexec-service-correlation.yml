@@ -1,0 +1,59 @@
+# Portable version of Wazuh rule 100104 (correlation: NTLM logon + service install).
+# Sigma has no direct equivalent of Wazuh's `if_sid` / `if_matched_sid`, so this
+# file expresses the same logic two ways:
+#   1. a base rule on the psexec service-install artifact (Event 7045), and
+#   2. a Sigma `correlation` that fires when that service install follows an
+#      NTLM remote logon on the same host within a short window.
+---
+title: Suspicious Service Installed from Windows Directory (psexec-style)
+id: 3c7b2e1a-9d4f-4a2b-8e6c-1f0a9b8c7d56
+status: experimental
+description: >
+  Detects a service installed to run a binary from the Windows root path with a
+  random-looking name running as LocalSystem - the fingerprint left by psexec-style
+  remote execution over SMB admin shares.
+references:
+  - https://attack.mitre.org/techniques/T1021/002/
+  - https://attack.mitre.org/techniques/T1569/002/
+author: yosubcode
+date: 2026-11-01
+tags:
+  - attack.lateral-movement
+  - attack.execution
+  - attack.t1021.002
+  - attack.t1569.002
+logsource:
+  product: windows
+  service: system
+detection:
+  selection:
+    EventID: 7045
+    ServiceName|re: '^[A-Za-z]{4,8}$'            # random short service name
+    ImagePath|contains: '%systemroot%'
+  condition: selection
+falsepositives:
+  - Some legitimate management or deployment tools install transient services
+level: high
+---
+title: Pass-the-Hash via psexec (NTLM logon followed by service install)
+id: a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d
+status: experimental
+description: >
+  Correlates a remote NTLM logon with a psexec-style service install on the same
+  host within two minutes. Either event alone is low-confidence; together they are
+  a strong Pass-the-Hash / lateral-movement signal. Mirrors Wazuh rule 100104.
+correlation:
+  type: temporal
+  rules:
+    - pth-ntlm-remote-logon            # id of the logon rule (see pth-ntlm-remote-logon.yml)
+    - 3c7b2e1a-9d4f-4a2b-8e6c-1f0a9b8c7d56   # the service-install rule above
+  group-by:
+    - Computer
+  timespan: 2m
+  ordered: true
+tags:
+  - attack.lateral-movement
+  - attack.t1550.002
+  - attack.t1021.002
+  - attack.t1569.002
+level: critical
