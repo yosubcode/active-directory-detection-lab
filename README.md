@@ -26,6 +26,7 @@ Isolated VirtualBox network (`192.168.56.0/24`, Host-Only, static IPs):
 | # | Attack | MITRE | Status |
 |---|---|---|---|
 | 01 | [Kerberoasting + AS-REP Roasting](01-kerberoasting/) | T1558.003, T1558.004 | Complete |
+| 02 | [Pass-the-Hash](02-pass-the-hash) | T1550.002 | Attack + detection |
 
 Module 01 also covers AES-downgrade evasion and behavioral hardening, false-positive validation, and the detections rewritten as vendor-neutral [Sigma rules](01-kerberoasting/sigma/).
 
