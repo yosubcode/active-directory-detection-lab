@@ -165,6 +165,76 @@ Portable [Sigma versions](sigma) of both rules are in `sigma/`.
 
 ---
 
+## 5. Incident response (NIST SP 800-61)
+
+| Term | What it is |
+|------|------------|
+| **Containment** | Stop the immediate bleeding — here, invalidate the stolen hash |
+| **Eradication** | Remove the root cause so the attack can't recur |
+| **Protected Users** | An AD group whose members cannot authenticate with NTLM, only Kerberos |
+| **LAPS** | Local Administrator Password Solution — gives every machine a different, rotated local admin password |
+
+Detection told us the attack happened. Response is what closes it. The interesting part of Pass-the-Hash response is that the obvious first move does not actually fix it.
+
+### Containment — reset the password, and watch it fall short
+
+The instinct is to reset the compromised account's password, since the NTLM hash is derived from it:
+
+```powershell
+Set-ADAccountPassword -Identity Administrator -Reset -NewPassword (Read-Host -AsSecureString)
+```
+
+![Password reset on the domain Administrator](screenshots/11-pth-ir-password-reset.png)
+
+After the reset, the old hash is dead. Re-running the attack with it fails against both the DC and the endpoint:
+
+```
+impacket-secretsdump -hashes :d014...a2ce lab.local/Administrator@192.168.56.10
+# STATUS_LOGON_FAILURE
+
+impacket-psexec -hashes :d014...a2ce lab.local/Administrator@192.168.56.20
+# STATUS_LOGON_FAILURE
+```
+
+![Old hash rejected at the DC and the endpoint after the reset](screenshots/12-pth-ir-oldhash-blocked.png)
+
+But this is only half a fix. The password reset kills *that* hash, not the technique. An attacker who still has a foothold on the DC just dumps the new hash and continues — the credential value changes, the attack does not. A password reset is necessary, but on its own it does not stop Pass-the-Hash.
+
+### Eradication — block NTLM for the account
+
+The structural fix is to stop the account from using NTLM at all. Adding it to the **Protected Users** group forces Kerberos-only authentication, so a stolen hash is useless regardless of its value:
+
+```powershell
+Add-ADGroupMember -Identity "Protected Users" -Members Administrator
+Get-ADGroupMember "Protected Users" | Select-Object Name
+```
+
+![Administrator added to Protected Users](screenshots/13-pth-ir-protected-users.png)
+
+Re-running the attack now fails with a different error than before:
+
+```
+impacket-psexec -hashes :d014...a2ce lab.local/Administrator@192.168.56.20
+# STATUS_ACCOUNT_RESTRICTION - authentication information are valid,
+# but some user account restriction has prevented successful authentication
+```
+
+![Protected Users blocks the Pass-the-Hash attempt](screenshots/14-pth-ir-protected-users-blocks.png)
+
+The error code is the whole story. Containment produced `STATUS_LOGON_FAILURE` — the hash was *wrong*. Eradication produces `STATUS_ACCOUNT_RESTRICTION` — the hash would be accepted, but NTLM itself is now refused for this account. That is the difference between blocking one key and changing the lock to a kind the attacker's keys don't fit. A freshly dumped hash would hit the same wall.
+
+### Recovery and lessons
+
+Protected Users blocks NTLM, not Kerberos, so the account still works normally for legitimate domain logons. The detection rules (100103 and 100104) stay in place, so any repeat attempt still alerts.
+
+For the wider environment, the response points to three preventive controls:
+
+- **Protected Users** for sensitive accounts — blocks Pass-the-Hash at the protocol level.
+- **LAPS**, so every machine's local admin password (and hash) is unique — one compromised host no longer unlocks the rest.
+- **Tier 0 separation** — keep domain-admin accounts off ordinary workstations, so their hashes never land somewhere like WIN11 in the first place.
+
+---
+
 ## Lessons learned
 
 - When a SIEM already detects an attack, the job is to analyze and improve the existing coverage rather than duplicate it.
@@ -181,12 +251,6 @@ Portable [Sigma versions](sigma) of both rules are in `sigma/`.
 | Use Alternate Authentication Material: Pass the Hash | T1550.002 | Lateral Movement |
 | Remote Services: SMB/Windows Admin Shares | T1021.002 | Lateral Movement |
 | System Services: Service Execution | T1569.002 | Execution |
-
----
-
-## Next
-
-Incident Response (NIST SP 800-61) for this attack: containment, eradication, recovery, and re-attack verification. Coming next.
 
 ---
 
