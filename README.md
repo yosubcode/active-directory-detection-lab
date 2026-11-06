@@ -27,8 +27,9 @@ Isolated VirtualBox network (`192.168.56.0/24`, Host-Only, static IPs):
 |---|---|---|---|
 | 01 | [Kerberoasting + AS-REP Roasting](01-kerberoasting/) | T1558.003, T1558.004 | Complete |
 | 02 | [Pass-the-Hash](02-pass-the-hash) | T1550.002 | Complete |
+| 03 | [ARP Spoofing / MITM](03-arp-spoofing/) | T1557.002 | Complete |
 
-Module 01 also covers AES-downgrade evasion and behavioral hardening, false-positive validation, and the detections rewritten as vendor-neutral [Sigma rules](01-kerberoasting/sigma/).
+Module 01 also covers AES-downgrade evasion and behavioral hardening, false-positive validation, and the detections rewritten as vendor-neutral [Sigma rules](01-kerberoasting/sigma/). Module 03 adds the lab's first network-layer (L2) attack, detected by wiring an [arpwatch](03-arp-spoofing/) network sensor into Wazuh.
 
 *More attacks in progress.*
 
@@ -36,8 +37,8 @@ Module 01 also covers AES-downgrade evasion and behavioral hardening, false-posi
 
 ## Skills Demonstrated
 
-- **Red team:** AD enumeration, Kerberoasting and AS-REP Roasting (Impacket), offline hash cracking.
-- **Blue team / Detection Engineering:** Windows event analysis, custom Wazuh rule authoring, MITRE ATT&CK mapping, false-positive validation, closing detection gaps, and portable detections as Sigma (detection-as-code).
+- **Red team:** AD enumeration, Kerberoasting and AS-REP Roasting (Impacket), offline hash cracking, ARP cache poisoning and man-in-the-middle (arpspoof).
+- **Blue team / Detection Engineering:** Windows event analysis, custom Wazuh rule authoring, MITRE ATT&CK mapping, false-positive validation, closing detection gaps, integrating a non-Windows network sensor (arpwatch) into the SIEM, and portable detections as Sigma (detection-as-code).
 - **Incident Response:** full NIST SP 800-61 lifecycle, verified by re-attack.
 - **Infrastructure:** multi-VM AD lab, log-pipeline troubleshooting, time sync, network routing.
 
